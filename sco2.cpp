@@ -385,14 +385,11 @@ static std::wstring format_rank_display(const RankTable& table, double score) {
     return L"《 " + with_kyu + L" 》";
 }
 
-// Formats score with comma separators and 2 decimal places (e.g. 397,449.49)
+// Formats a positive score as a truncated integer with comma separators.
 static std::wstring format_score_number(double score) {
     std::wostringstream oss;
-    oss << std::fixed << std::setprecision(2) << score;
-    std::wstring s = oss.str();
-    size_t dot = s.find(L'.');
-    std::wstring int_part = (dot == std::wstring::npos) ? s : s.substr(0, dot);
-    std::wstring frac_part = (dot == std::wstring::npos) ? L"" : s.substr(dot);
+    oss << std::fixed << std::setprecision(0) << std::floor(score);
+    std::wstring int_part = oss.str();
 
     std::wstring formatted_int;
     int count = 0;
@@ -408,7 +405,7 @@ static std::wstring format_score_number(double score) {
         ++count;
     }
     std::reverse(formatted_int.begin(), formatted_int.end());
-    return formatted_int + frac_part;
+    return formatted_int;
 }
 
 // ============================================================================
@@ -874,6 +871,15 @@ static int run_self_test(HINSTANCE hInstance) {
         bool ok = (actual_raw == c.expected_raw) && (actual_disp == c.expected_display);
         check(ok, L"Boundary " + format_score_number(c.score) + L" -> " + actual_disp);
     }
+
+    check(format_score_number(397449.99) == L"397,449",
+          L"Score display truncates fractional digits");
+    check(format_score_number(529999.99) == L"529,999" &&
+          judge_rank_raw_name(table, 529999.99) == L"フリーザ第1形態・射程圏内",
+          L"Score display and rank below 530,000 remain consistent");
+    check(format_score_number(530000.0) == L"530,000" &&
+          judge_rank_raw_name(table, 530000.0) == L"フリーザ第1形態",
+          L"Score display and rank at 530,000 remain consistent");
 
     // 3. UTF-8 BOM & Comment / Multiple TAB / Duplicate / Corrupted line tests
     {
