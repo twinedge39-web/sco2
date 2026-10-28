@@ -2,6 +2,7 @@
 *.pdb
 *.ilk
 *.log
+/sco2.exe
 .vs/
 x64/
 Debug/

@@ -1,4 +1,4 @@
-// SCO2 (すこすこ) - New Scouter GUI & Self-Test
+// sco2 - New Scouter GUI & CLI
 // Preserves the experimental measurement routine from scouter_repro.cpp.
 // Build (MSVC x64): cl /nologo /O2 /EHsc /utf-8 /std:c++17 /MT sco2.cpp user32.lib gdi32.lib shell32.lib /link /SUBSYSTEM:WINDOWS /Fe:sco2.exe
 
@@ -127,13 +127,13 @@ struct RankTable {
     std::wstring error_message;
 };
 
-static std::wstring get_exe_dir_sco2_txt_path() {
+static std::wstring get_exe_dir_file_path(const std::wstring& filename) {
     std::wstring buf(MAX_PATH, L'\0');
     DWORD len = 0;
     while (true) {
         len = GetModuleFileNameW(nullptr, &buf[0], static_cast<DWORD>(buf.size()));
         if (len == 0) {
-            return L"sco2.txt";
+            return filename;
         }
         if (len < buf.size() - 1) {
             buf.resize(len);
@@ -143,9 +143,13 @@ static std::wstring get_exe_dir_sco2_txt_path() {
     }
     size_t pos = buf.find_last_of(L"\\/");
     if (pos == std::wstring::npos) {
-        return L"sco2.txt";
+        return filename;
     }
-    return buf.substr(0, pos + 1) + L"sco2.txt";
+    return buf.substr(0, pos + 1) + filename;
+}
+
+static std::wstring get_exe_dir_sco2_txt_path() {
+    return get_exe_dir_file_path(L"sco2.txt");
 }
 
 static bool utf8_to_wstring_strict(const std::string& bytes, std::wstring& out) {
@@ -674,7 +678,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 }
 
 // ============================================================================
-// 4. Built-in Self-Test & CLI Mode (--self-test / --cli)
+// 4. Console Connection, Log Saving, Built-in Self-Test & CLI Mode
 // ============================================================================
 
 static std::string wstring_to_utf8(const std::wstring& wstr) {
@@ -686,13 +690,78 @@ static std::string wstring_to_utf8(const std::wstring& wstr) {
     return out;
 }
 
-static void write_stdout_utf8(const std::wstring& msg) {
-    std::string u8 = wstring_to_utf8(msg);
-    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (hOut && hOut != INVALID_HANDLE_VALUE) {
-        DWORD written = 0;
-        WriteFile(hOut, u8.data(), static_cast<DWORD>(u8.size()), &written, nullptr);
+static std::string wstring_to_cp(const std::wstring& wstr, UINT cp) {
+    if (wstr.empty()) return "";
+    int len = WideCharToMultiByte(cp, 0, wstr.data(), static_cast<int>(wstr.size()), nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return wstring_to_utf8(wstr);
+    std::string out(len, '\0');
+    WideCharToMultiByte(cp, 0, wstr.data(), static_cast<int>(wstr.size()), &out[0], len, nullptr, nullptr);
+    return out;
+}
+
+class ConsoleOutputSession {
+public:
+    ConsoleOutputSession() {
+        // Check if stdout is already redirected to a pipe or disk file
+        HANDLE hStdOut = GetStdHandle(STD_OUTPUT_HANDLE);
+        if (hStdOut && hStdOut != INVALID_HANDLE_VALUE) {
+            DWORD type = GetFileType(hStdOut);
+            if (type == FILE_TYPE_PIPE || type == FILE_TYPE_DISK) {
+                hPipeOrFile_ = hStdOut;
+            }
+        }
+
+        // Attach to parent console (PowerShell / cmd.exe) so console output works from GUI subsystem
+        if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+            attached_ = true;
+        }
+        hConOut_ = CreateFileW(
+            L"CONOUT$", GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            nullptr, OPEN_EXISTING, 0, nullptr);
     }
+
+    ~ConsoleOutputSession() {
+        if (hConOut_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(hConOut_);
+            hConOut_ = INVALID_HANDLE_VALUE;
+        }
+        if (attached_) {
+            FreeConsole();
+        }
+    }
+
+    void print(const std::wstring& msg) {
+        if (hPipeOrFile_ != INVALID_HANDLE_VALUE) {
+            UINT cp = GetConsoleOutputCP();
+            if (cp == 0) cp = CP_UTF8;
+            std::string bytes = wstring_to_cp(msg, cp);
+            DWORD written = 0;
+            WriteFile(hPipeOrFile_, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr);
+        } else if (hConOut_ != INVALID_HANDLE_VALUE) {
+            DWORD written = 0;
+            WriteConsoleW(hConOut_, msg.data(), static_cast<DWORD>(msg.size()), &written, nullptr);
+        }
+    }
+
+private:
+    bool attached_ = false;
+    HANDLE hPipeOrFile_ = INVALID_HANDLE_VALUE;
+    HANDLE hConOut_ = INVALID_HANDLE_VALUE;
+};
+
+static bool save_utf8_file(const std::wstring& path, const std::wstring& content) {
+    HANDLE hFile = CreateFileW(
+        path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    std::string u8 = wstring_to_utf8(content);
+    DWORD written = 0;
+    BOOL ok = WriteFile(hFile, u8.data(), static_cast<DWORD>(u8.size()), &written, nullptr);
+    CloseHandle(hFile);
+    return ok && written == u8.size();
 }
 
 static HWND create_main_window(HINSTANCE hInstance, int nCmdShow) {
@@ -725,7 +794,7 @@ static HWND create_main_window(HINSTANCE hInstance, int nCmdShow) {
     int pos_y = (screen_h - win_h) / 2;
 
     HWND hwnd = CreateWindowExW(
-        0, CLASS_NAME, L"SCO2 - すこすこ",
+        0, CLASS_NAME, L"sco2",
         style,
         pos_x, pos_y, win_w, win_h,
         nullptr, nullptr, hInstance, nullptr);
@@ -738,22 +807,39 @@ static HWND create_main_window(HINSTANCE hInstance, int nCmdShow) {
 }
 
 static int run_self_test(HINSTANCE hInstance) {
-    bool all_passed = true;
+    ConsoleOutputSession console;
+    std::wstring log_buffer;
+    int passed_count = 0;
+    int failed_count = 0;
+
+    auto log_line = [&](const std::wstring& line) {
+        console.print(line + L"\r\n");
+        log_buffer += line + L"\r\n";
+    };
+
     auto check = [&](bool cond, const std::wstring& desc) {
         if (cond) {
-            write_stdout_utf8(L"[PASS] " + desc + L"\n");
+            ++passed_count;
+            log_line(L"[PASS] " + desc);
         } else {
-            write_stdout_utf8(L"[FAIL] " + desc + L"\n");
-            all_passed = false;
+            ++failed_count;
+            log_line(L"[FAIL] " + desc);
         }
     };
+
+    console.print(L"\r\n");
+    log_line(L"=== sco2 Self-Test ===");
 
     // 1. Load sco2.txt next to sco2.exe
     std::wstring path = get_exe_dir_sco2_txt_path();
     RankTable table = load_rank_table_from_file(path);
     check(table.ok, L"Load sco2.txt from EXE directory (" + path + L"), entries=" + std::to_wstring(table.entries.size()));
     if (!table.ok) {
-        write_stdout_utf8(L"  Error: " + table.error_message + L"\n");
+        log_line(L"  Error: " + table.error_message);
+        std::wstring summary = L"=== テスト結果: 成功 " + std::to_wstring(passed_count) +
+                               L" 件 / 失敗 " + std::to_wstring(failed_count) + L" 件 ===";
+        log_line(summary);
+        save_utf8_file(get_exe_dir_file_path(L"sco2-test.log"), log_buffer);
         return 1;
     }
 
@@ -830,7 +916,11 @@ static int run_self_test(HINSTANCE hInstance) {
     {
         enable_dpi_awareness();
         HWND hwnd = create_main_window(hInstance, SW_SHOWNOACTIVATE);
-        check(hwnd != nullptr, L"GUI window created (Title: SCO2 - すこすこ)");
+        wchar_t title_buf[64] = {};
+        if (hwnd) {
+            GetWindowTextW(hwnd, title_buf, 64);
+        }
+        check(hwnd != nullptr && std::wstring(title_buf) == L"sco2", L"GUI window created (Title: sco2)");
         if (hwnd) {
             // Trigger first measurement via button click
             SendMessageW(hwnd, WM_COMMAND, MAKEWPARAM(IDC_MEASURE_BUTTON, BN_CLICKED), reinterpret_cast<LPARAM>(g_app.hButton));
@@ -866,7 +956,30 @@ static int run_self_test(HINSTANCE hInstance) {
         }
     }
 
-    return all_passed ? 0 : 1;
+    int total_count = passed_count + failed_count;
+    std::wstring log_path = get_exe_dir_file_path(L"sco2-test.log");
+    log_line(L"----------------------------------------");
+    log_line(L"テスト結果集計: 成功 " + std::to_wstring(passed_count) +
+             L" 件 / 失敗 " + std::to_wstring(failed_count) +
+             L" 件 (合計 " + std::to_wstring(total_count) + L" 件)");
+    log_line(L"ログ保存先: " + log_path);
+
+    save_utf8_file(log_path, log_buffer);
+    return (failed_count == 0) ? 0 : 1;
+}
+
+static int run_cli_mode() {
+    ConsoleOutputSession console;
+    console.print(L"\r\n測定中...\r\n");
+    RankTable table = load_rank_table_from_file(get_exe_dir_sco2_txt_path());
+    MeasurementResult res = run_single_measurement();
+    if (!res.valid) {
+        console.print(res.error_message + L"\r\n");
+        return 1;
+    }
+    console.print(L"このPCの戦闘力は " + format_score_number(res.score) + L" です。\r\n");
+    console.print(format_rank_display(table, res.score) + L"\r\n");
+    return 0;
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
@@ -879,15 +992,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
             return run_self_test(hInstance);
         }
         if (arg1 == L"--cli") {
-            RankTable table = load_rank_table_from_file(get_exe_dir_sco2_txt_path());
-            MeasurementResult res = run_single_measurement();
-            if (!res.valid) {
-                write_stdout_utf8(res.error_message + L"\n");
-                return 1;
-            }
-            write_stdout_utf8(L"このPCの戦闘力は " + format_score_number(res.score) + L" です。\n");
-            write_stdout_utf8(format_rank_display(table, res.score) + L"\n");
-            return 0;
+            return run_cli_mode();
         }
     } else if (argv) {
         LocalFree(argv);

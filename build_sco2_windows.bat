@@ -24,6 +24,7 @@ echo [ERROR] Visual Studio 2022 Build Tools (MSVC x64) not found.
 exit /b 1
 
 :build_msvc
+cd /d "%~dp0"
 cl /nologo /O2 /EHsc /utf-8 /std:c++17 /MT sco2.cpp user32.lib gdi32.lib shell32.lib /link /SUBSYSTEM:WINDOWS /Fe:sco2.exe
 if errorlevel 1 (
     echo [ERROR] Build failed.
